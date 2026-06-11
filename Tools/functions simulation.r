@@ -81,8 +81,17 @@ setldel_param <- function(claim_size, occurrence_period) {
   mean_quarter <- a * pmin(25, pmax(1, 6 + 4*log(claim_size/(1000 * ref_claim))))
   target_mean <- mean_quarter / 8 / time_unit
   target_cv <- 0.60
-  c(shape = get_Weibull_parameters(target_mean, target_cv)[1, ],
+  params <- c(shape = get_Weibull_parameters(target_mean, target_cv)[1, ],
     scale = get_Weibull_parameters(target_mean, target_cv)[2, ])
+  
+  # Apply LOB-based settlement speed multiplier if available
+  if (exists("current_lob_context") && !is.null(current_lob_context)) {
+    speed_factor <- settlement_speed_by_lob[[current_lob_context]]
+    if (!is.null(speed_factor)) {
+      params["scale"] <- params["scale"] * speed_factor
+    }
+  }
+  params
 }
 
 # define sampling function for number of payments
@@ -194,6 +203,9 @@ base_inflation_vector <- c(base_inflation_past, base_inflation_future)
 #####################################################################
 data.generation.type <- function(type, exposure, seed){
   set.seed(seed)                         
+  origin_date <- simulation_start_date
+  start_year <- simulation_start_year
+  annual_growth <- annual_exposure_growth
   
   ### choice of monthly exposures and frequencies
   ### exposure is annualized
@@ -216,6 +228,11 @@ data.generation.type <- function(type, exposure, seed){
   if (type==6) {
     E <- exposure + c(1:I) * exposure / (2*I)
     lambda <- c(rep(.05, I))}
+
+  # Apply business-volume growth to exposure over time.
+  # If time_unit = 1/12 this is monthly compounding of annual_exposure_growth.
+  growth_factor <- (1 + annual_growth) ^ ((c(1:I) - 1) * time_unit)
+  E <- E * growth_factor
   
   ### simulation of numbers of claims and accident dates   
   n_vector <- claim_frequency(I=I, E=E, freq=lambda)
@@ -224,7 +241,7 @@ data.generation.type <- function(type, exposure, seed){
   ### set up data frame: Id, Type, Age, AccDate, AccMonth, AccWeekday
   n <- sum(n_vector)
   get_weekday <- function(Date) {
-    days_since_start <- 1 + as.integer(difftime(Date, as.Date("2011-12-31"), units="days"))
+    days_since_start <- 1 + as.integer(difftime(Date, origin_date, units="days"))
     i <- (days_since_start - 1) %% 7 + 1
     # return
     c("Sat", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri")[i]
@@ -233,8 +250,8 @@ data.generation.type <- function(type, exposure, seed){
   
   claims_ <- data.frame(Id = c(1:n), Type = type) %>% dplyr::mutate(
     Age = sample(size=n, x=c(18:65), replace=TRUE),
-    AccDate = as.Date(ceiling(unlist(acc_time) * 365.25 / 12), origin = "2011-12-31"),
-    AccMonth = 12 * (as.integer(substr(AccDate, 1, 4)) - 2012) + as.integer(substr(AccDate, 6, 7)),
+    AccDate = as.Date(ceiling(unlist(acc_time) * 365.25 / 12), origin = origin_date),
+    AccMonth = 12 * (as.integer(substr(AccDate, 1, 4)) - start_year) + as.integer(substr(AccDate, 6, 7)),
     AccWeekday = factor(get_weekday(AccDate), levels=c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"))
   )
   
@@ -275,11 +292,11 @@ data.generation.type <- function(type, exposure, seed){
     claim_size_list = Ultimate, notification_list = RepDel, 
     settlement_list = SetDel, no_payments_list = PayCount
   ) %>% dplyr::mutate(
-    RepDate = as.Date(ceiling((occurrence_time + notidel) * 365.25 / 12), origin = "2011-12-31"),
-    RepMonth = 12 * (as.integer(substr(RepDate, 1, 4)) - 2012) + as.integer(substr(RepDate, 6, 7)),
+    RepDate = as.Date(ceiling((occurrence_time + notidel) * 365.25 / 12), origin = origin_date),
+    RepMonth = 12 * (as.integer(substr(RepDate, 1, 4)) - start_year) + as.integer(substr(RepDate, 6, 7)),
     RepDelDays = as.integer(difftime(RepDate, claims_$AccDate, units="days")),
-    SetDate = as.Date(ceiling((occurrence_time + notidel + setldel) * 365.25 / 12), origin = "2011-12-31"),
-    SetMonth = 12 * (as.integer(substr(SetDate, 1, 4)) - 2012) + as.integer(substr(SetDate, 6, 7)),
+    SetDate = as.Date(ceiling((occurrence_time + notidel + setldel) * 365.25 / 12), origin = origin_date),
+    SetMonth = 12 * (as.integer(substr(SetDate, 1, 4)) - start_year) + as.integer(substr(SetDate, 6, 7)),
     SetDelMonths = SetMonth - RepMonth
   ) %>% dplyr::rename(
     PayCount = no_payment
@@ -306,8 +323,8 @@ data.generation.type <- function(type, exposure, seed){
       Paid = payment_inflated) %>%
     dplyr::mutate(
       Paid = round(Paid),
-      PayDate = as.Date(ceiling(PayTime * 365.25 / 12), origin = "2011-12-31"),
-      PayMonth = 12 * (as.integer(substr(PayDate, 1, 4)) - 2012) + as.integer(substr(PayDate, 6, 7))) %>%
+      PayDate = as.Date(ceiling(PayTime * 365.25 / 12), origin = origin_date),
+      PayMonth = 12 * (as.integer(substr(PayDate, 1, 4)) - start_year) + as.integer(substr(PayDate, 6, 7))) %>%
     dplyr::select(Id, PayId, PayMonth, Paid) # We drop PayDate, PayTime
 
   ### rounding some payments to 1'000's
@@ -386,28 +403,47 @@ data.generation.type <- function(type, exposure, seed){
 
 
 
-data.generation <- function(seed, future_info = FALSE){
+data.generation <- function(seed, future_info = FALSE, types_to_simulate = c(1:6), lob_name = NULL, exposure_scale = 1.0){
   
-  exposure = c(40000, 30000, 10000, 40000, 20000, 20000)
+  # Set LOB context for settlement speed multiplier
+  if (!is.null(lob_name)) {
+    current_lob_context <<- lob_name
+  }
+  
+  # Base exposure vector scaled by business mix
+  base_exposure = c(40000, 30000, 10000, 40000, 20000, 20000)
+  exposure = base_exposure * exposure_scale
   seeds = seed + c(0:5)
   
-  for (type in c(1:6)) {
-    if (type == 1) {
-      # Initialise loop
-      data_list <- data.generation.type(type, exposure[type], seeds[type])
-      # get individual data components
+  # Initialize local variables to NULL
+  claims <- NULL
+  paid <- NULL
+  reopen <- NULL
+  
+  for (type in types_to_simulate) {
+    data_list <- data.generation.type(type, exposure[type], seeds[type])
+    
+    if (is.null(claims)) {
+      # Initialize on first iteration
       claims <- data_list$claims
       paid   <- data_list$paid
       reopen <- data_list$reopen
     } else {
-      data_list <- data.generation.type(type, exposure[type], seeds[type])
-      # get individual data components
-      data_list$claims$Id <- data_list$claims$Id + nrow(claims)
-      data_list$paid$Id <- data_list$paid$Id + nrow(claims)
-      data_list$reopen$Id <- data_list$reopen$Id + nrow(claims)
+      # Append subsequent types
+      id_offset <- nrow(claims)
+      data_list$claims$Id <- data_list$claims$Id + id_offset
+      data_list$paid$Id <- data_list$paid$Id + id_offset
+      if (nrow(data_list$reopen) > 0) {
+        data_list$reopen$Id <- data_list$reopen$Id + id_offset
+      }
+      
       claims <- rbind(claims, data_list$claims)
       paid   <- rbind(paid, data_list$paid)
-      reopen <- rbind(reopen, data_list$reopen)
+      
+      # Handle reopen carefully: only rbind if data_list has rows
+      if (nrow(data_list$reopen) > 0) {
+        reopen <- rbind(reopen, data_list$reopen)
+      }
     }
   }
   
@@ -423,15 +459,21 @@ data.generation <- function(seed, future_info = FALSE){
     dplyr::select(-Id) %>% # remove old Id
     dplyr::rename(Id = Id_new) %>%
     dplyr::arrange(Id, EventId)
-  reopen <- merge(Id_map, reopen, by = "Id", all.y = T) %>%
-    dplyr::select(-Id) %>% # remove old Id
-    dplyr::rename(Id = Id_new) %>%
-    dplyr::arrange(Id)
+  
+  # Handle reopen separately to avoid issues with empty dataframes
+  if (nrow(reopen) > 0) {
+    reopen <- merge(Id_map, reopen, by = "Id", all.y = T) %>%
+      dplyr::select(-Id) %>% # remove old Id
+      dplyr::rename(Id = Id_new) %>%
+      dplyr::arrange(Id)
+  }
   
   # impose maximal reporting delay of 3 years
   claims <- claims[claims$RepDelDays <= 365 * 3, ]
   paid <- paid[paid$Id %in% claims$Id, ]
-  reopen <- reopen[reopen$Id %in% claims$Id, ]
+  if (nrow(reopen) > 0) {
+    reopen <- reopen[reopen$Id %in% claims$Id, ]
+  }
   
   # save full simulated claims and paid data, if future_info == TRUE
   if (future_info == FALSE) {

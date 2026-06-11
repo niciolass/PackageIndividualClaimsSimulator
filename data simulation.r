@@ -24,7 +24,23 @@ ref_claim <- 1          # currency is 1
 time_unit <- 1/12       # we consider monthly claims development
 set_parameters(ref_claim=ref_claim, time_unit=time_unit)
 
-years <- 10               # number of occurrence years
+# Portfolio growth controls (business volume / premium growth effect)
+annual_exposure_growth <- 0.03
+
+# Settlement speed controls by LOB (multiplier on settlement delay: 0.5 = twice as fast, 2.0 = twice as slow)
+settlement_speed_by_lob <- list(
+  health = 0.7,
+  personal_accident = 1.0,
+  motor_liability = 1.2,
+  general_liability = 1.5,
+  other_motor = 0.9,
+  property = 0.8
+)
+
+# Simulation window controls
+simulation_start_date <- as.Date("2014-12-31") # first occurrence month starts right after this date
+simulation_start_year <- as.integer(format(simulation_start_date + 1, "%Y"))
+years <- 12               # number of occurrence years
 I <- years/time_unit      # number of development periods
 
 source("./Tools/functions simulation.R")
@@ -66,8 +82,8 @@ source("./Tools/functions plotting.R")
 rep_claims <- claims %>% 
   dplyr::filter(!is.na(RepDate)) %>%
   dplyr::mutate(
-    AccWeek = ceiling((as.integer(difftime(AccDate, as.Date("2011-12-31"), units="days"))-.5)/7),
-    RepWeek = ceiling((as.integer(difftime(RepDate, as.Date("2011-12-31"), units="days"))-.5)/7))
+    AccWeek = ceiling((as.integer(difftime(AccDate, simulation_start_date, units="days"))-.5)/7),
+    RepWeek = ceiling((as.integer(difftime(RepDate, simulation_start_date, units="days"))-.5)/7))
 
 # plot accident dates vs reporting delays
 save.yes <- 1
@@ -96,12 +112,13 @@ with(
     x=AccMonth, y=count, ylim=range(plot_data$count),
     type='l', main=list("claim counts per claim type", cex=1.5), col=col_type[1], 
     xlab="accident date (in monthly units)", ylab="claim counts", cex.lab=1.5))
-polygon(x=c(120-36, 120, 120, 120-36), y=c(0,0,250,250), border=FALSE, col=adjustcolor("gray", alpha.f=0.3)) 
+cutoff_month <- years / time_unit
+polygon(x=c(cutoff_month-36, cutoff_month, cutoff_month, cutoff_month-36), y=c(0,0,250,250), border=FALSE, col=adjustcolor("gray", alpha.f=0.3)) 
 for (jj in 1:6){
   with(plot_data %>% filter(Type == jj),
        lines(x=AccMonth, y=count, col=col_type[jj]))
 }
-abline(v=c(0:10)*12, lty=3, col="darkgray") # add gridlines
+abline(v=(0:years) / time_unit, lty=3, col="darkgray") # add gridlines
 legend(x="topleft", col=col_type, lwd=rep(6,1), legend=paste("claim type ", c(1:6), sep="")) # add legend
 if (save.yes==1){
   # close graphic device
@@ -462,6 +479,8 @@ tt <- data.frame(
 )
 names(tt) <- c("ChainLadder", "True", "Difference", "RMSEP", "%")
 tt
+
+
 
 
 

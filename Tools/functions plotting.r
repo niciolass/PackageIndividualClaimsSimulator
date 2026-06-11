@@ -40,7 +40,9 @@ plot_triangle <- function(portfolio, claim_type, x_lim, save.yes, path) {
     points(x=RepWeek-AccWeek, y=y_lim-AccWeek, cex=0.8, pch=19, col="green"))
   
   # label y-axis
-  axis(2, at=c(0:10)*365.25/7, label=rev(c(2012:2022)), cex=1.5, las=2)
+  axis_breaks <- (0:years) * 365.25 / 7
+  axis_labels <- rev(seq(simulation_start_year, simulation_start_year + years))
+  axis(2, at=axis_breaks, label=axis_labels, cex=1.5, las=2)
   
   # draw a diagonal line
   abline(a=0, b=1, col="orange", lwd=2)  
